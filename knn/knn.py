@@ -4,6 +4,8 @@ import argparse
 import logging
 import numpy as np
 import pandas as pd
+from thefuzz import fuzz
+import json
 import os
 
 class DataManager:
@@ -15,10 +17,6 @@ class DataManager:
     def get_data(self):
         movies_df  = pd.read_csv(os.path.join(self.data_folder, "movies.csv"))
         ratings_df = pd.read_csv(os.path.join(self.data_folder, "ratings.csv"))
-
-        logging.info("Total number of movies:  {}".format(len(movies_df)))
-        logging.info("Total number of ratings: {}".format(len(ratings_df)))
-
         return movies_df, ratings_df
 
 
@@ -49,7 +47,12 @@ class MovieRecommender:
         self.ratings_df = ratings_df
 
         # This determines the popularity threshold. In this count, how many ratings it got
-        self.popular_threshold = 50
+        self.popular_threshold = 20
+
+        # Lets go with five nearest neighbours to begin with
+        self.num_neighbours = 5
+        self.knn = KNN(self.num_neighbours)
+
 
     def build_features(self):
         movies_ratings_df =  pd.merge(self.movies_df, self.ratings_df, on='movieId')
@@ -59,16 +62,47 @@ class MovieRecommender:
 
         # merge with ratings
         ratings_with_total_rating_count = movies_ratings_df.merge(movie_rating_count_df, left_on='title', right_on='title', how='left')
-        # Retrieve popular movies
-        ratings_popular_movie_df = ratings_with_total_rating_count.query('total_rating_count >= @self.popular_threshold')
+
+        # Get popular movies
+        rarings_with_popular_movies = ratings_with_total_rating_count.query('total_rating_count >= @self.popular_threshold')
+
         # pivot the table
-        movie_features_df = ratings_popular_movie_df.pivot_table(index = 'title', columns = 'userId', values = 'rating').fillna(0)
+        movie_features_df = ratings_with_total_rating_count.pivot_table(index = 'title', columns = 'userId', values = 'rating').fillna(0)
 
         return movie_features_df
 
+    def calculate_similarity(self, movie_name_a, movie_name_b):
+        return fuzz.ratio(movie_name_a, movie_name_b)
 
-    def recommend_movies(self, movie_name):
-        pass
+    def find_movie(self, movie_name, movie_features_df):
+        maximum_similarity, matched_movie_name, matched_movie_series = None, None, None
+        for idx in range(movie_features_df.shape[0]):
+            movie = movie_features_df.iloc[idx].name
+            similarity = self.calculate_similarity(movie, movie_name)
+            if not maximum_similarity or similarity > maximum_similarity:
+                maximum_similarity = similarity
+                matched_movie_name = movie
+                matched_movie_series = movie_features_df.iloc[idx]
+        return maximum_similarity, matched_movie_name, matched_movie_series
+
+    def recommend_movies(self, movie_name, movie_features_df):
+        similarity, matched_movie_name, matched_movie_series = self.find_movie(movie_name, movie_features_df)
+        logging.info("Matched movie name: {}\tSimilarity score: {}".format(matched_movie_name, similarity))
+
+        if similarity <= 35:
+            logging.error("Couldn't find better match in our hot list. Can't recommend for this exotic movie")
+
+        neighbours = []
+        for idx in range(movie_features_df.shape[0]):
+            movie_series = movie_features_df.iloc[idx]
+            distance = self.knn.calculate_euclidean_distance(movie_series.values, matched_movie_series.values)
+            neighbours.append((distance, movie_features_df.iloc[idx].name))
+
+        neighbours.sort()
+
+        logging.info("\n\n\nHere are the top recommended movies")
+        for distance, movie_name in neighbours[1:10]:
+            logging.info("Movie name: {}\tdistance: {}".format(movie_name, distance))
 
 
 def setup_logging(args):
@@ -78,10 +112,11 @@ def setup_logging(args):
         logging.basicConfig(encoding='utf-8', level=logging.INFO)
 
 def create_parser():
-    parser = argparse.ArgumentParser(description='KNN algorithm implementation')
+    parser = argparse.ArgumentParser(description='Movie Recommender system using KNN algorithm')
 
     parser.add_argument('--data-location', type=str, help='Data location to train and test the model', default='data')
     parser.add_argument('--log-level', type=str, help='Choices to choose from [DEBUG, INFO, WARNING, ERROR]', default='INFO')
+    parser.add_argument('--movie-name', type=str, help='Choose the movie name', required=True)
 
     return parser
 
@@ -91,3 +126,4 @@ if __name__ == "__main__":
 
     movie_recommender = MovieRecommender(args.data_location)
     movie_features_df = movie_recommender.build_features()
+    movie_recommender.recommend_movies(args.movie_name, movie_features_df)
